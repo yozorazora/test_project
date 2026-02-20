@@ -1,0 +1,67 @@
+name: Smart Terraform Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # STEP 1: Detect what changed
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      # We output the list of modules to run as a JSON array
+      modules: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            payment-api: 'apps/payment-api/**'
+            user-api: 'apps/user-api/**'
+            global: 'global/**'
+
+  # STEP 2: Execute based on changes
+  terraform:
+    needs: detect-changes
+    # If only CHANGELOG changed, 'modules' will be empty [] and this job skips
+    if: ${{ needs.detect-changes.outputs.modules != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # This converts the filter output into a parallel execution list
+        module: ${{ fromJSON(needs.detect-changes.outputs.modules) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve Target Directory
+        id: target
+        run: |
+          # Logic: If global changed, we need to run for specific apps.
+          # If a specific app changed, we run for that app.
+          if [[ "${{ matrix.module }}" == "global" ]]; then
+            echo "path=apps/payment-api apps/user-api" >> $GITHUB_OUTPUT
+            echo "mode=FULL CHECK" >> $GITHUB_OUTPUT
+          else
+            echo "path=apps/${{ matrix.module }}" >> $GITHUB_OUTPUT
+            echo "mode=PARTIAL" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          # Loop through paths (handles the 'global' trigger case where path is a list)
+          for dir in ${{ steps.target.outputs.path }}; do
+            echo "### Running Plan for $dir" >> $GITHUB_STEP_SUMMARY
+            cd $dir
+            terraform init -no-color
+            # Capture output and pipe to Step Summary
+            echo '```terraform' >> $GITHUB_STEP_SUMMARY
+            terraform plan -no-color >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cd -
+          done
